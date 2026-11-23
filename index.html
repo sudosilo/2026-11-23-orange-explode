@@ -30,6 +30,12 @@
   #base { display:block; width:100%; height:100%; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.12); }
   .piece { position:absolute; touch-action:none; transition:transform .25s ease-out, filter .25s ease-out; will-change:transform; transform-style:preserve-3d; }
   .piece.drag, .playing .piece { transition:none; }
+  #base { transition:opacity .4s, filter .4s; }
+  .playing #base { transition:none; }
+  .piece > canvas, .callout { transition:opacity .4s; }
+  .piece.gone { opacity:0; pointer-events:none; transition:opacity .4s, transform .25s ease-out; }
+  .piece.shell > canvas, .piece.shell > .callout { opacity:0; }
+  .piece.focused > canvas { outline:2px solid var(--accent); outline-offset:3px; }
   .piece > canvas { width:100%; height:100%; display:block; pointer-events:none; }
   .callout { position:absolute; left:50%; top:50%; width:0; height:0; pointer-events:none; z-index:999; }
   .callout svg { position:absolute; left:0; top:0; overflow:visible; width:1px; height:1px; }
@@ -71,13 +77,13 @@
   <select id="dir"><option value="out">Spread out</option><option value="toward">Toward you</option><option value="away">Away from you</option></select></div>
 <div id="wrap">
   <div id="empty">Pick a photo, then tap anything in it.</div>
-  <div id="view" hidden><div id="zl"></div><div id="zoom"><button id="zin">+</button><button id="zout">-</button><button id="zfit">Fit</button></div><div id="stage"><canvas id="base"></canvas></div></div>
+  <div id="view" hidden><div id="zl"></div><div id="zoom"><button id="zin">+</button><button id="zout">-</button><button id="zfit">Fit</button><button id="zup" hidden>Back</button></div><div id="stage"><canvas id="base"></canvas></div></div>
 </div>
 <div id="editor" hidden>
   <textarea id="text" placeholder="Bubble text"></textarea>
   <div class="row"><button id="save">Save</button><button id="remove">Remove</button><button id="close">Close</button></div>
 </div>
-<div id="tabs"><button id="tabCut" class="on">Cut</button><button id="tabBubble">Bubble</button></div>
+<div id="tabs"><button id="tabCut" class="on">Cut</button><button id="tabBubble">Bubble</button><button id="tabFocus">Focus</button></div>
 
 <script type="module">
 import { SamModel, AutoProcessor, RawImage, Tensor, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
@@ -91,6 +97,7 @@ const say = t => { statusEl.textContent = t; };
 const tick = () => new Promise(r => setTimeout(r, 30));
 
 let model, processor, root = null;
+let focus = null;
 let pieces = [], busy = false, showHoles = true, showBubbles = true, tool = 'cut', editing = null;
 
 async function load() {
@@ -116,6 +123,8 @@ $('file').onchange = async e => {
   baseCanvas.width = W; baseCanvas.height = H;
   pieces.forEach(p => p.el.remove());
   pieces = [];
+  focus = null;
+  $('zup').hidden = true;
   closeEditor();
   root = { isRoot: true, src, w: W, h: H, el: stage, canvas: baseCanvas, children: [], emb: null };
   $('empty').hidden = true;
@@ -167,7 +176,15 @@ function zoomAt(vx, vy, nz) {
 }
 $('zin').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, cam.z * 1.5);
 $('zout').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, cam.z / 1.5);
-$('zfit').onclick = () => fit(true);
+$('zfit').onclick = () => {
+  if (!focus) return fit(true);
+  const vr = view.getBoundingClientRect(), r = focus.el.querySelector('canvas').getBoundingClientRect();
+  const f = Math.min((vr.width - 60) / r.width, (vr.height - 60) / r.height);
+  const sx = (r.left + r.width / 2 - vr.left - cam.x) / cam.z, sy = (r.top + r.height / 2 - vr.top - cam.y) / cam.z;
+  cam.z = Math.min(12, Math.max(0.3, cam.z * f));
+  cam.x = vr.width / 2 - sx * cam.z; cam.y = vr.height / 2 - sy * cam.z;
+  applyCam();
+};
 view.addEventListener('wheel', e => {
   e.preventDefault();
   const r = view.getBoundingClientRect();
@@ -192,12 +209,14 @@ function alphaAt(p, nx, ny) {
 function hit(cx, cy) {
   for (const el of document.elementsFromPoint(cx, cy)) {
     if (el === baseCanvas) {
+      if (focus) return null;
       const r = baseCanvas.getBoundingClientRect();
       return { layer: root, nx: (cx - r.left) / r.width, ny: (cy - r.top) / r.height };
     }
     if (el.classList && el.classList.contains('piece')) {
       const p = pieces.find(q => q.el === el);
       if (!p) continue;
+      if (focus && p !== focus && !isUnder(p, focus)) continue;
       const r = el.getBoundingClientRect();
       const nx = (cx - r.left) / r.width, ny = (cy - r.top) / r.height;
       if (alphaAt(p, nx, ny) > 0) return { layer: p, nx, ny };
@@ -264,6 +283,7 @@ const release = async e => {
   if (pr.moved || e.type === 'pointercancel' || !pr.h) return;
   const { layer, nx, ny } = pr.h;
   if (tool === 'bubble') { if (!layer.isRoot) openEditor(layer); else say('Tap a cut piece to give it a bubble.'); return; }
+  if (tool === 'focus') { if (!layer.isRoot) setFocus(layer); else say('Tap a cut piece to focus on it.'); return; }
   await tapCut(layer, nx, ny, e.clientX, e.clientY);
 };
 view.addEventListener('pointerup', release);
@@ -362,16 +382,25 @@ async function cut(layer, nx, ny) {
   say(pieces.length + ' piece' + (pieces.length > 1 ? 's' : '') + (depth > 1 ? ', level ' + depth + ' cut.' : '.') + ' Tap a piece to cut deeper.');
 }
 
+function isUnder(p, anc) { for (let q = p.parent; q && !q.isRoot; q = q.parent) if (q === anc) return true; return false; }
+function activePieces() { return focus ? pieces.filter(p => isUnder(p, focus)) : pieces; }
 function layout() {
   const K = $('explode').value / 100;
   const seq = $('mode').value === 'seq';
-  const n = pieces.length;
+  const act = activePieces();
+  const n = act.length;
   const span = n > 1 ? 0.6 / (n - 1) : 0;
-  pieces.forEach((p, i) => {
-    const k = seq && n > 1 ? Math.min(1, Math.max(0, (K - i * span) / 0.4)) : K;
+  const dir = $('dir').value;
+  baseCanvas.style.opacity = focus ? 0 : 1 - 0.82 * K;
+  baseCanvas.style.filter = `grayscale(${focus ? 1 : Math.min(1, K * 1.2)})`;
+  pieces.forEach(p => {
+    const ai = act.indexOf(p);
+    let k;
+    if (ai >= 0) k = seq && n > 1 ? Math.min(1, Math.max(0, (K - ai * span) / 0.4)) : K;
+    else k = p.kFrozen ?? K;
+    p.k = k;
     const pw = p.parent.el.clientWidth, ph = p.parent.el.clientHeight;
     const reach = p.depth === 1 ? 0.8 : 1.1;
-    const dir = $('dir').value;
     const spread = dir === 'out' ? 1 : 0;
     const ox = (p.cx - 0.5) * pw * reach * k * spread + p.dx;
     const oy = (p.cy - 0.5) * ph * reach * k * spread + p.dy;
@@ -380,9 +409,30 @@ function layout() {
     p.el.style.transform = `translate3d(${ox}px, ${oy}px, ${z}px) scale(${sc})`;
     p.el.style.filter = `drop-shadow(0 ${4 + 14 * k}px ${6 + 12 * k}px rgba(0,0,0,${0.18 + 0.15 * k}))`;
     p.el.style.zIndex = 10 + p.n;
-    const show = !!p.text && (editing === p || (showBubbles && k >= 0.97));
+    const related = !focus || p === focus || ai >= 0;
+    const shell = focus && isUnder(focus, p);
+    p.el.classList.toggle('gone', !!focus && !related && !shell);
+    p.el.classList.toggle('shell', !!shell);
+    p.el.classList.toggle('focused', p === focus);
+    const show = !!p.text && related && (editing === p || (showBubbles && k >= 0.97));
     callout(p, show);
   });
+}
+function setFocus(p) {
+  if (stage.classList.contains('playing')) stopPlay();
+  pieces.forEach(q => { q.kFrozen = undefined; });
+  focus = p;
+  if (p) {
+    layoutFreeze();
+    $('explode').value = 0;
+  }
+  $('zup').hidden = !p;
+  layout();
+  say(p ? 'Focused. Slide to explode its parts. Cut tab cuts deeper inside it. Back goes up a level.' : 'Showing the whole photo.');
+}
+function layoutFreeze() {
+  const act = activePieces();
+  pieces.forEach(q => { if (!act.includes(q)) q.kFrozen = q.k ?? 0; });
 }
 function callout(p, show) {
   const top = topOf(p);
@@ -437,7 +487,8 @@ const waitMs = (ms, tok) => new Promise(r => setTimeout(() => r(tok === playToke
 async function playLoop(tok) {
   while (tok === playToken) {
     const sp = +$('speed').value;
-    const n = pieces.length;
+    const act = activePieces();
+    const n = act.length;
     const seq = $('mode').value === 'seq' && n > 1;
     if (seq) {
       const span = 0.6 / (n - 1);
@@ -446,13 +497,13 @@ async function playLoop(tok) {
         const end = Math.min(1, i * span + 0.4);
         if (!await animateK(prev, end, 900 / sp, tok)) return;
         prev = end;
-        if (pieces[i].text && !await waitMs(typeTime(pieces[i]) / sp, tok)) return;
+        if (act[i].text && !await waitMs(typeTime(act[i]) / sp, tok)) return;
       }
       if (!await waitMs(500 / sp, tok)) return;
       if (!await animateK(1, 0, (600 + n * 350) / sp, tok)) return;
     } else {
       if (!await animateK(0, 1, 1500 / sp, tok)) return;
-      const hold = Math.max(800, ...pieces.map(typeTime));
+      const hold = Math.max(800, ...act.map(typeTime));
       if (!await waitMs(hold / sp, tok)) return;
       if (!await animateK(1, 0, 1500 / sp, tok)) return;
     }
@@ -466,7 +517,7 @@ function stopPlay() {
 }
 $('play').onclick = () => {
   if ($('play').textContent === 'Stop') { stopPlay(); return; }
-  if (!pieces.length) { say('Cut something first.'); return; }
+  if (!activePieces().length) { say(focus ? 'Cut parts inside this piece first.' : 'Cut something first.'); return; }
   const tok = ++playToken;
   $('play').textContent = 'Stop';
   stage.classList.add('playing');
@@ -501,12 +552,15 @@ function setTool(t) {
   tool = t;
   $('tabCut').classList.toggle('on', t === 'cut');
   $('tabBubble').classList.toggle('on', t === 'bubble');
+  $('tabFocus').classList.toggle('on', t === 'focus');
   if (t === 'cut') closeEditor();
-  say(t === 'cut' ? 'Cut: tap the photo or tap a piece to cut deeper.' : 'Bubble: tap a cut piece to write its label. Labels show while you slide forward.');
+  say({ cut: 'Cut: tap the photo or tap a piece to cut deeper.', bubble: 'Bubble: tap a cut piece to write its label. Labels show while you slide forward.', focus: 'Focus: tap a piece. Everything else fades away.' }[t] || '');
   layout();
 }
 $('tabCut').onclick = () => setTool('cut');
 $('tabBubble').onclick = () => setTool('bubble');
+$('tabFocus').onclick = () => setTool('focus');
+$('zup').onclick = () => { const p = focus && !focus.parent.isRoot ? focus.parent : null; setFocus(p); };
 
 function buttons() {
   $('undo').disabled = !pieces.length;
@@ -516,6 +570,7 @@ $('undo').onclick = () => {
   const p = pieces.pop();
   if (!p) return;
   if (editing === p) closeEditor();
+  if (focus && (focus === p || isUnder(focus, p))) setFocus(p.parent.isRoot ? null : p.parent);
   p.el.remove();
   p.parent.children = p.parent.children.filter(c => c !== p);
   redraw(p.parent);
@@ -524,6 +579,7 @@ $('undo').onclick = () => {
 };
 $('clear').onclick = () => {
   closeEditor();
+  if (focus) setFocus(null);
   pieces.forEach(p => p.el.remove());
   pieces = [];
   root.children = [];
