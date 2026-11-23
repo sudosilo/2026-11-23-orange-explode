@@ -7,6 +7,7 @@
 <style>
   :root { --bg:#f6f4ef; --ink:#222; --soft:#8a857b; --line:#d9d4c8; --accent:#e8692c; }
   * { box-sizing:border-box; }
+  html, body { overflow-x:clip; max-width:100%; }
   html, body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui, sans-serif; }
   body { padding-bottom:150px; }
   header { padding:14px 16px 6px; }
@@ -17,11 +18,15 @@
   button:disabled { opacity:.45; }
   label.btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
   input[type=file] { display:none; }
-  .slider { display:flex; align-items:center; gap:10px; padding:4px 16px 10px; font-size:14px; color:var(--soft); }
-  .slider input { flex:1; accent-color:var(--accent); }
-  .slider select { padding:8px 10px; font-size:14px; }
-  #wrap { padding:40px 16px 20px; perspective:900px; }
-  #stage { position:relative; margin:0 auto; touch-action:none; transform-style:preserve-3d; }
+  .slider { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; padding:4px 16px 10px; font-size:14px; color:var(--soft); }
+  .slider input { flex:1 1 60%; min-width:0; accent-color:var(--accent); }
+  .slider select { flex:1 1 40%; min-width:0; padding:8px 10px; font-size:14px; }
+  #wrap { padding:0 16px 20px; }
+  #view { position:relative; height:62vh; overflow:hidden; perspective:900px; touch-action:none; background:#efece5; border:1px solid var(--line); border-radius:10px; }
+  #zoom { position:absolute; right:8px; top:8px; display:flex; gap:6px; z-index:2500; }
+  #zoom button { padding:6px 12px; font-size:16px; }
+  #zl { position:absolute; left:10px; top:12px; font-size:12px; color:var(--soft); z-index:2500; pointer-events:none; }
+  #stage { position:absolute; left:0; top:0; transform-origin:0 0; transform-style:preserve-3d; }
   #base { display:block; width:100%; height:100%; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.12); }
   .piece { position:absolute; touch-action:none; transition:transform .25s ease-out, filter .25s ease-out; will-change:transform; transform-style:preserve-3d; }
   .piece.drag { transition:none; }
@@ -64,7 +69,7 @@
   <select id="dir"><option value="out">Spread out</option><option value="toward">Toward you</option><option value="away">Away from you</option></select></div>
 <div id="wrap">
   <div id="empty">Pick a photo, then tap anything in it.</div>
-  <div id="stage" hidden><canvas id="base"></canvas></div>
+  <div id="view" hidden><div id="zl"></div><div id="zoom"><button id="zin">+</button><button id="zout">-</button><button id="zfit">Fit</button></div><div id="stage"><canvas id="base"></canvas></div></div>
 </div>
 <div id="editor" hidden>
   <textarea id="text" placeholder="Bubble text"></textarea>
@@ -112,8 +117,8 @@ $('file').onchange = async e => {
   closeEditor();
   root = { isRoot: true, src, w: W, h: H, el: stage, canvas: baseCanvas, children: [], emb: null };
   $('empty').hidden = true;
-  stage.hidden = false;
-  fit();
+  $('view').hidden = false;
+  fit(true);
   redraw(root);
   buttons();
   e.target.value = '';
@@ -136,15 +141,37 @@ async function embed(layer) {
   return layer.emb;
 }
 
-function fit() {
-  const maxW = Math.min(window.innerWidth - 32, 900);
-  const maxH = window.innerHeight * 0.6;
-  const s = Math.min(maxW / root.w, maxH / root.h);
-  stage.style.width = (root.w * s) + 'px';
-  stage.style.height = (root.h * s) + 'px';
+const view = $('view');
+const cam = { z: 1, x: 0, y: 0 };
+function applyCam() {
+  stage.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.z})`;
+  $('zl').textContent = Math.round(cam.z * 100) + '%';
+}
+function fit(resetCam) {
+  const vw = view.clientWidth, vh = view.clientHeight;
+  const s = Math.min((vw - 24) / root.w, (vh - 24) / root.h);
+  const sw = root.w * s, sh = root.h * s;
+  stage.style.width = sw + 'px';
+  stage.style.height = sh + 'px';
+  if (resetCam) { cam.z = 1; cam.x = (vw - sw) / 2; cam.y = (vh - sh) / 2; }
+  applyCam();
   layout();
 }
-window.addEventListener('resize', () => { if (root) fit(); });
+function zoomAt(vx, vy, nz) {
+  nz = Math.min(12, Math.max(0.3, nz));
+  const sx = (vx - cam.x) / cam.z, sy = (vy - cam.y) / cam.z;
+  cam.z = nz; cam.x = vx - sx * nz; cam.y = vy - sy * nz;
+  applyCam();
+}
+$('zin').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, cam.z * 1.5);
+$('zout').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, cam.z / 1.5);
+$('zfit').onclick = () => fit(true);
+view.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = view.getBoundingClientRect();
+  zoomAt(e.clientX - r.left, e.clientY - r.top, cam.z * Math.exp(-e.deltaY * 0.0015));
+}, { passive: false });
+window.addEventListener('resize', () => { if (root) fit(false); });
 
 function redraw(layer) {
   const c = layer.canvas.getContext('2d');
@@ -177,38 +204,68 @@ function hit(cx, cy) {
   return null;
 }
 
-let press = null;
-stage.addEventListener('pointerdown', e => {
-  if (!root) return;
-  const h = hit(e.clientX, e.clientY);
-  if (!h) return;
+let press = null, pinch = null;
+const pts = new Map();
+const viewPt = (x, y) => { const r = view.getBoundingClientRect(); return { x: x - r.left, y: y - r.top }; };
+function startPinch() {
+  const [a, b] = [...pts.values()];
+  const m = viewPt((a.x + b.x) / 2, (a.y + b.y) / 2);
+  pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, z0: cam.z, sx: (m.x - cam.x) / cam.z, sy: (m.y - cam.y) / cam.z };
+}
+view.addEventListener('pointerdown', e => {
+  if (!root || e.target.closest('#zoom')) return;
   e.preventDefault();
-  stage.setPointerCapture(e.pointerId);
-  press = { h, sx: e.clientX, sy: e.clientY, moved: false };
-  if (!h.layer.isRoot) { press.dx = h.layer.dx; press.dy = h.layer.dy; }
+  view.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pts.size === 2) {
+    if (press && !press.h.layer.isRoot) press.h.layer.el.classList.remove('drag');
+    press = null;
+    startPinch();
+    return;
+  }
+  if (pts.size > 2) return;
+  const h = hit(e.clientX, e.clientY);
+  press = { h, sx: e.clientX, sy: e.clientY, moved: false, cx: cam.x, cy: cam.y };
+  if (h && !h.layer.isRoot) { press.dx = h.layer.dx; press.dy = h.layer.dy; }
 });
-stage.addEventListener('pointermove', e => {
+view.addEventListener('pointermove', e => {
+  if (!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pts.size >= 2) {
+    const [a, b] = [...pts.values()];
+    const m = viewPt((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const nz = Math.min(12, Math.max(0.3, pinch.z0 * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0));
+    cam.z = nz; cam.x = m.x - pinch.sx * nz; cam.y = m.y - pinch.sy * nz;
+    applyCam();
+    return;
+  }
   if (!press) return;
   const mx = e.clientX - press.sx, my = e.clientY - press.sy;
   if (!press.moved && Math.hypot(mx, my) > 8) press.moved = true;
-  if (press.moved && !press.h.layer.isRoot) {
+  if (!press.moved) return;
+  if (press.h && !press.h.layer.isRoot) {
     const p = press.h.layer;
     p.el.classList.add('drag');
-    p.dx = press.dx + mx; p.dy = press.dy + my;
+    p.dx = press.dx + mx / cam.z; p.dy = press.dy + my / cam.z;
     layout();
+  } else {
+    cam.x = press.cx + mx; cam.y = press.cy + my;
+    applyCam();
   }
 });
 const release = async e => {
+  pts.delete(e.pointerId);
+  if (pinch) { if (pts.size < 2) pinch = null; return; }
   if (!press) return;
   const pr = press; press = null;
-  if (!pr.h.layer.isRoot) pr.h.layer.el.classList.remove('drag');
-  if (pr.moved || e.type === 'pointercancel') return;
+  if (pr.h && !pr.h.layer.isRoot) pr.h.layer.el.classList.remove('drag');
+  if (pr.moved || e.type === 'pointercancel' || !pr.h) return;
   const { layer, nx, ny } = pr.h;
   if (tool === 'bubble') { if (!layer.isRoot) openEditor(layer); else say('Tap a cut piece to give it a bubble.'); return; }
   await tapCut(layer, nx, ny, e.clientX, e.clientY);
 };
-stage.addEventListener('pointerup', release);
-stage.addEventListener('pointercancel', release);
+view.addEventListener('pointerup', release);
+view.addEventListener('pointercancel', release);
 
 async function tapCut(layer, nx, ny, cx, cy) {
   if (busy) return;
@@ -216,7 +273,7 @@ async function tapCut(layer, nx, ny, cx, cy) {
   const sr = stage.getBoundingClientRect();
   const ping = document.createElement('div');
   ping.className = 'ping';
-  ping.style.left = (cx - sr.left) + 'px'; ping.style.top = (cy - sr.top) + 'px';
+  ping.style.left = ((cx - sr.left) / cam.z) + 'px'; ping.style.top = ((cy - sr.top) / cam.z) + 'px';
   stage.appendChild(ping);
   setTimeout(() => ping.remove(), 900);
   busy = true;
