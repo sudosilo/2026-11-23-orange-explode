@@ -26,9 +26,13 @@
   .piece { position:absolute; touch-action:none; transition:transform .25s ease-out, filter .25s ease-out; will-change:transform; transform-style:preserve-3d; }
   .piece.drag { transition:none; }
   .piece > canvas { width:100%; height:100%; display:block; pointer-events:none; }
-  .bubble { position:absolute; bottom:100%; left:50%; transform:translate(-50%, -10px); background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:12px; padding:6px 10px; font-size:13px; line-height:1.3; white-space:pre-wrap; width:max-content; max-width:200px; box-shadow:0 3px 10px rgba(0,0,0,.15); opacity:0; transition:opacity .35s; pointer-events:none; z-index:999; }
-  .bubble::after { content:""; position:absolute; left:50%; top:100%; margin-left:-6px; border:6px solid transparent; border-top-color:#fff; }
-  .bubble.show { opacity:1; }
+  .callout { position:absolute; left:50%; top:50%; width:0; height:0; pointer-events:none; z-index:999; }
+  .callout svg { position:absolute; left:0; top:0; overflow:visible; width:1px; height:1px; }
+  .callout line { stroke:#222; stroke-width:1.5; transition:stroke-dashoffset .35s ease-out; }
+  .callout circle { fill:var(--accent); opacity:0; transition:opacity .15s; }
+  .callout .label { position:absolute; background:#fff; color:#222; border:1.5px solid #222; padding:4px 8px; font-size:12px; line-height:1.25; letter-spacing:1.5px; text-transform:uppercase; font-weight:600; white-space:pre-wrap; width:max-content; max-width:180px; opacity:0; transition:opacity .25s ease-out; }
+  .callout.show circle { opacity:1; }
+  .callout.show .label { opacity:1; transition-delay:.3s; }
   .piece.editing > canvas { outline:2px dashed var(--accent); outline-offset:2px; }
   .ping { position:absolute; width:18px; height:18px; margin:-9px 0 0 -9px; border-radius:50%; border:3px solid var(--accent); pointer-events:none; animation:ping .9s ease-out forwards; z-index:2000; }
   @keyframes ping { to { transform:scale(2.4); opacity:0; } }
@@ -282,7 +286,8 @@ async function cut(layer, nx, ny) {
   cv.width = w; cv.height = h;
   el.appendChild(cv);
   const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  bubble.className = 'callout';
+  bubble.innerHTML = '<svg><line x1="0" y1="0"/><circle cx="0" cy="0" r="3.5"/></svg><div class="label"></div>';
   el.appendChild(bubble);
   layer.el.appendChild(el);
 
@@ -312,11 +317,29 @@ function layout() {
     p.el.style.transform = `translate3d(${ox}px, ${oy}px, ${z}px)`;
     p.el.style.filter = `drop-shadow(0 ${4 + 14 * k}px ${6 + 12 * k}px rgba(0,0,0,${0.18 + 0.15 * k}))`;
     p.el.style.zIndex = 10 + p.n;
-    p.bubble.textContent = p.text;
-    const show = p.text && (tool === 'bubble' || (showBubbles && k >= 0.97));
-    p.bubble.classList.toggle('show', !!show);
+    const show = !!p.text && (editing === p || (showBubbles && k >= 0.97));
+    callout(p, show);
   });
 }
+function callout(p, show) {
+  const top = topOf(p);
+  let vx = top.cx - 0.5, vy = top.cy - 0.5;
+  const d = Math.hypot(vx, vy) || 1;
+  vx /= d; vy /= d;
+  if (Math.abs(vx) < 0.2 && Math.abs(vy) < 0.2) { vx = 0.7; vy = -0.7; }
+  const L = 70 + p.depth * 20;
+  const ex = vx * L, ey = vy * L;
+  const line = p.bubble.querySelector('line');
+  line.setAttribute('x2', ex); line.setAttribute('y2', ey);
+  line.style.strokeDasharray = L;
+  line.style.strokeDashoffset = show ? 0 : L;
+  const lab = p.bubble.querySelector('.label');
+  lab.textContent = p.text;
+  lab.style.left = ex + 'px'; lab.style.top = ey + 'px';
+  lab.style.transform = `translate(${vx >= 0 ? '4px' : 'calc(-100% - 4px)'}, -50%)`;
+  p.bubble.classList.toggle('show', show);
+}
+function topOf(p) { while (!p.parent.isRoot) p = p.parent; return p; }
 $('explode').oninput = layout;
 $('mode').onchange = layout;
 
@@ -327,11 +350,13 @@ function openEditor(p) {
   $('text').value = p.text;
   $('editor').hidden = false;
   $('text').focus();
+  layout();
 }
 function closeEditor() {
   if (editing) editing.el.classList.remove('editing');
   editing = null;
   $('editor').hidden = true;
+  layout();
 }
 $('save').onclick = () => { if (editing) { editing.text = $('text').value.trim(); layout(); } closeEditor(); };
 $('remove').onclick = () => { if (editing) { editing.text = ''; layout(); } closeEditor(); };
@@ -342,7 +367,7 @@ function setTool(t) {
   $('tabCut').classList.toggle('on', t === 'cut');
   $('tabBubble').classList.toggle('on', t === 'bubble');
   if (t === 'cut') closeEditor();
-  say(t === 'cut' ? 'Cut: tap the photo or tap a piece to cut deeper.' : 'Bubble: tap a cut piece to write its bubble.');
+  say(t === 'cut' ? 'Cut: tap the photo or tap a piece to cut deeper.' : 'Bubble: tap a cut piece to write its label. Labels show while you slide forward.');
   layout();
 }
 $('tabCut').onclick = () => setTool('cut');
